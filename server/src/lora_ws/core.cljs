@@ -10,10 +10,6 @@
 
 (defonce port (serial-port "/dev/cu.usbmodem1411" (clj->js {:baudRate 9600})))
 
-(comment (.write port (->> {:lat -33 :lon 18}
-                           clj->js
-                           (.stringify js/JSON))))
-
 ;; app gets redefined on reload
 (def app (express))
 
@@ -27,7 +23,10 @@
 (.post app "/msg"
        (fn [req res]
          (let [body (js->clj (.-body req) :keywordize-keys true)
-               json (->> body
+               msg  {:callsign (or (:callsign body) "LORA")
+                     :lat      (or (:lat body) 0)
+                     :lon      (or (:lon body) 0)}
+               json (->> msg
                          clj->js
                          (.stringify js/JSON))]
            (.write port json)

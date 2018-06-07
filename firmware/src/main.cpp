@@ -32,36 +32,47 @@ uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
 
 float currentFreq = RF95_FREQ;
 
-void transmitData(float lat, float lon)
-{
+// Don't pack this, for easier marshalling
+#pragma pack(1)
 
+typedef struct Packet
+{
+  uint8_t magicNumber[2];
+  char callsign[4];
+  int32_t lat;
+  int32_t lon;
+  char isAccurate;
+} Packet;
+
+#pragma pack()
+
+void transmitData(char *callsign, float lat, float lon)
+{
   char buff[20];
 
   sprintf(buff, "Using %.2fmhz", currentFreq);
   Serial.println(buff);
 
-  uint8_t len = 2 * sizeof(int32_t) + sizeof(uint8_t) + CALLSIGN_LEN + MAGIC_NUMBER_LEN;
-  uint8_t radiopacket[len];
+  Packet newPacket;
+
   for (int i = 0; i < MAGIC_NUMBER_LEN; i++)
   {
-    radiopacket[i] = MAGIC_NUMBER[i];
+    newPacket.magicNumber[i] = MAGIC_NUMBER[i];
   }
   for (uint8_t i = 0; i < CALLSIGN_LEN; i++)
   {
-    radiopacket[MAGIC_NUMBER_LEN + i] = '0';
+    newPacket.callsign[i] = callsign[i];
   }
-  void *p = radiopacket + MAGIC_NUMBER_LEN + CALLSIGN_LEN;
-  *(int32_t *)p = (int32_t)(lat * 1e6);
-  p = (int32_t *)p + 1;
-  *(int32_t *)p = (int32_t)(lon * 1e6);
-  p = (int32_t *)p + 1;
-  *(uint8_t *)p = true;
+
+  newPacket.lat = (int32_t)(lat * 1e6);
+  newPacket.lon = (int32_t)(lon * 1e6);
+  newPacket.isAccurate = true;
 
   Serial.println("Saying Hai");
 
   sending = true;
   digitalWrite(LED_BUILTIN, HIGH);
-  rf95.send((uint8_t *)radiopacket, len);
+  rf95.send((uint8_t *)&newPacket, sizeof(newPacket));
   rf95.waitPacketSent();
   digitalWrite(LED_BUILTIN, LOW);
   sending = false;
@@ -78,21 +89,8 @@ void initRadio()
   digitalWrite(RFM95_RST, HIGH);
   delay(10);
 
-  while (!rf95.init())
-  {
-    Serial.println("Radio init issue");
-    while (1)
-      ;
-  }
-
-  if (!rf95.setFrequency(RF95_FREQ))
-  {
-    Serial.println("Freq setting issue");
-    while (1)
-      ;
-  }
-
-  //rf95.setModemConfig(RH_RF95::Bw125Cr45Sf128);
+  rf95.init();
+  rf95.setFrequency(RF95_FREQ);
 
   RH_RF95::ModemConfig config;
 
@@ -109,7 +107,6 @@ void initRadio()
 
 void setup()
 {
-
   pinMode(LED_BUILTIN, OUTPUT);
 
   Serial.begin(9600);
@@ -118,11 +115,11 @@ void setup()
   initRadio();
 }
 
+StaticJsonBuffer<1024> jsonBuffer;
 char readString[256];
 
 void loop()
 {
-
   if (Serial.available() > 0)
   {
     int len = Serial.readBytesUntil('\n', readString, 256);
@@ -135,25 +132,30 @@ void loop()
       Serial.print(readString);
       Serial.println("!!");
 
-      DynamicJsonBuffer jsonBuffer;
       JsonObject &root = jsonBuffer.parseObject(readString);
 
       float lat = 0;
       float lon = 0;
+      char callsign[5];
+
+      strcpy(callsign, CALLSIGN);
 
       // Test if parsing succeeds.
-      if (!root.success())
+      if (root.success())
       {
-        Serial.println("parseObject() failed");
+        Serial.println("success");
+
+        String callsignStr = root["callsign"];
+        callsignStr.toCharArray(callsign, 5);
+        lat = root["lat"];
+        lon = root["lon"];
+
+        transmitData(callsign, lat, lon);
       }
       else
       {
-        Serial.println("success");
-        lat = root["lat"];
-        lon = root["lon"];
+        Serial.println("parseObject() failed");
       }
-
-      transmitData(lat, lon);
     }
   }
 }
