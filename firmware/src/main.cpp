@@ -1,161 +1,201 @@
-#include <RH_RF95.h>
-#include <Wire.h>
 #include <SPI.h>
-#include <ArduinoJson.h>
+#include <RH_RF95.h>
+#include <SSD1306.h>
+#include <WiFi.h>
+#include <FS.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <rBase64.h>
 
-// Builtin LED
-#define LED_PIN 13
+#include "fonts.h"
 
-//LoRA radio for feather m0
-// INT is different for 32u4 feather
-#define RFM95_CS 12
-#define RFM95_RST 11
-#define RFM95_INT 10
+const char *ssid = "SSID";
+const char *password = "password";
 
-// Change to 434.0 or other frequency, must match RX's freq!
-// #define RF95_FREQ 915.0
-#define RF95_FREQ 915.0
+// Hardware config
+#define SCK     5    // GPIO5  -- SCK
+#define MISO    19   // GPIO19 -- MISO
+#define MOSI    27   // GPIO27 -- MOSI
+#define SS      18   // GPIO18 -- CS
+#define RST     12   // GPIO14 -- RESET (If Lora does not work, replace it with GPIO14)
+#define DI0     26   // GPIO26 -- IRQ(Interrupt Request)
 
-// Singleton instance of the radio driver
-RH_RF95 rf95(RFM95_CS, RFM95_INT);
+#define SDA     21
+#define SCL     22
 
-bool sending = false;
+AsyncWebServer server(80);
 
-#define CALLSIGN_LEN 4
-#define CALLSIGN "BUTT"
+RH_RF95 rf95(SS, DI0);
 
-#define MAGIC_NUMBER_LEN 2
+SSD1306 display(0x3c, SDA, SCL);
 
-uint8_t MAGIC_NUMBER[MAGIC_NUMBER_LEN] = {0x2c, 0x0b};
+//U8G2_SSD1306_128X64_NONAME_F_HW_I2C display()
 
-uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
 
-float currentFreq = RF95_FREQ;
+// state stuff
 
-// Don't pack this, for easier marshalling
-#pragma pack(1)
+float loraFreq = 915.0;
 
-typedef struct Packet
-{
-  uint8_t magicNumber[2];
-  char callsign[4];
-  int32_t lat;
-  int32_t lon;
-  char isAccurate;
-} Packet;
+int lastRssi;
 
-#pragma pack()
+char foo[50];
 
-void transmitData(char *callsign, float lat, float lon)
-{
-  char buff[20];
+void initRadio() {
+  pinMode(RST, OUTPUT);
+  digitalWrite(RST, HIGH);
 
-  sprintf(buff, "Using %.2fmhz", currentFreq);
-  Serial.println(buff);
-
-  Packet newPacket;
-
-  for (int i = 0; i < MAGIC_NUMBER_LEN; i++)
-  {
-    newPacket.magicNumber[i] = MAGIC_NUMBER[i];
-  }
-  for (uint8_t i = 0; i < CALLSIGN_LEN; i++)
-  {
-    newPacket.callsign[i] = callsign[i];
-  }
-
-  newPacket.lat = (int32_t)(lat * 1e6);
-  newPacket.lon = (int32_t)(lon * 1e6);
-  newPacket.isAccurate = true;
-
-  Serial.println("Saying Hai");
-
-  sending = true;
-  digitalWrite(LED_BUILTIN, HIGH);
-  rf95.send((uint8_t *)&newPacket, sizeof(newPacket));
-  rf95.waitPacketSent();
-  digitalWrite(LED_BUILTIN, LOW);
-  sending = false;
-}
-
-void initRadio()
-{
-  pinMode(RFM95_RST, OUTPUT);
-  digitalWrite(RFM95_RST, HIGH);
-
-  // Manual reset
-  digitalWrite(RFM95_RST, LOW);
+  digitalWrite(RST, LOW);
   delay(10);
-  digitalWrite(RFM95_RST, HIGH);
+  digitalWrite(RST, HIGH);
   delay(10);
 
-  rf95.init();
-  rf95.setFrequency(RF95_FREQ);
+  Serial.print("LoRa init: ");
+  if (rf95.init())
+    Serial.println("Success");
+  else
+    Serial.println("Failed");
 
-  RH_RF95::ModemConfig config;
+  Serial.print("LoRa set freq: ");
+  if (rf95.setFrequency(loraFreq))
+    Serial.println(loraFreq);
+  else
+    Serial.println("Failed");
 
-  config.reg_1d = 0x70 + 0x02;
-  config.reg_1e = 0x70 + 0x04;
-  config.reg_26 = 0x00;
-
-  rf95.setModemRegisters(&config);
-
-  rf95.setTxPower(23, false);
-
-  Serial.println("Radio initiated!");
+  Serial.print("LoRa config modem: ");
+  if (rf95.setModemConfig(RH_RF95::Bw125Cr45Sf128))
+    Serial.println("Success");
 }
 
-void setup()
-{
-  pinMode(LED_BUILTIN, OUTPUT);
+void initDisplay(){
+  display.init();
+  display.setFont(Roboto_Mono_12);
+}
 
+void initNetwork(){
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void printToOled(int line, const char* format, ...){
+  va_list arguments;
+  char buff[50];
+  va_start(arguments, format);
+  vsprintf(buff, format, arguments);
+  va_end(arguments);
+  display.drawString(0, line * 15, buff);
+}
+
+void updateScreen()
+{
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
+
+  printToOled(0, "RSSI: %d", lastRssi);
+  printToOled(1, "%s", ssid);
+  IPAddress ip = WiFi.localIP();
+  printToOled(2, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+
+  printToOled(3, "%.2fMhz SF 7", loraFreq);
+  display.display();
+}
+
+void loraRecv() {
+  if (rf95.available()) {
+    // Should be a message for us now
+    byte buf[RH_RF95_MAX_MESSAGE_LEN];
+    uint8_t len = sizeof(buf);
+    if (rf95.recv(buf, &len))
+    {
+      //digitalWrite(led, HIGH);
+      Serial.println("Message received");
+      Serial.print("RSSI: ");
+
+      lastRssi = rf95.lastRssi();
+
+      Serial.println(rf95.lastRssi(), DEC);
+
+      Serial.print("Length: ");
+      Serial.println(len);
+
+      rbase64.encode(buf,len);
+      Serial.println(rbase64.result());
+
+      //digitalWrite(led, LOW);
+    }
+    else
+    {
+      Serial.println("recv failed");
+    }
+  }
+}
+
+void loraSend() {
+  int inputLength = String(foo).length();
+  if (inputLength > 0) {
+    int decodedLength = rbase64_dec_len(foo, inputLength);
+    char buffer[decodedLength];
+    Serial.println("Sending packet: ");
+    Serial.println(decodedLength);
+    rbase64_decode(buffer, foo, inputLength);
+    rf95.send((uint8_t*) buffer, decodedLength);
+    rf95.waitPacketSent();
+    foo[0] = 0x00;
+  }
+}
+
+void setup() {
+
+  //pinMode(led, OUTPUT);
   Serial.begin(9600);
-  Serial.println("Hii");
+  while (!Serial) ; // Wait for serial port to be available
 
   initRadio();
-}
+  initDisplay();
+  initNetwork();
 
-StaticJsonBuffer<1024> jsonBuffer;
-char readString[256];
+  server.on("/message", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (request->hasParam("payload")) {
+      String newMessage = request->getParam("payload")->value();
+      // handle URL encoding
+      newMessage.replace("-", "+");
+      newMessage.replace("_", "/");
+      newMessage.replace(".", "=");
+
+      Serial.print("Sending: ");
+      Serial.println(newMessage);
+
+      sprintf(foo, "%s", newMessage.c_str());
+    }
+    request->send(200, "text/plain", "Fine");
+  });
+
+  server.on("/config", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (request->hasParam("freq")) {
+      float newFrequency = request->getParam("freq")->value().toFloat();
+      if (rf95.setFrequency(newFrequency)) {
+        loraFreq = newFrequency;
+        Serial.print("Set frequency to: ");
+        Serial.println(newFrequency);
+      }
+    }
+    request->send(200, "text/plain", "Fine");
+  });
+
+  server.begin();
+}
 
 void loop()
 {
-  if (Serial.available() > 0)
-  {
-    int len = Serial.readBytesUntil('\n', readString, 256);
+  loraRecv();
+  loraSend();
 
-    if (len > 0)
-    {
-      readString[len] = 0;
-      Serial.println(len);
-      Serial.print("Read:");
-      Serial.print(readString);
-      Serial.println("!!");
-
-      JsonObject &root = jsonBuffer.parseObject(readString);
-
-      float lat = 0;
-      float lon = 0;
-      char callsign[5];
-
-      strcpy(callsign, CALLSIGN);
-
-      // Test if parsing succeeds.
-      if (root.success())
-      {
-        Serial.println("success");
-
-        String callsignStr = root["callsign"];
-        callsignStr.toCharArray(callsign, 5);
-        lat = root["lat"];
-        lon = root["lon"];
-
-        transmitData(callsign, lat, lon);
-      }
-      else
-      {
-        Serial.println("parseObject() failed");
-      }
-    }
-  }
+  updateScreen();
 }

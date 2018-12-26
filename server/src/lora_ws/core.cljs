@@ -1,5 +1,7 @@
 (ns lora-ws.core
-  (:require [cljs.nodejs :as nodejs]))
+  (:require-macros [hiccups.core :as hiccups :refer [html]])
+  (:require [cljs.nodejs :as nodejs]
+            [hiccups.runtime :as hiccupsrt]))
 
 (nodejs/enable-util-print!)
 
@@ -15,10 +17,19 @@
 
 (.use app (.json body-parser))
 
+(def page
+  [:html
+   [:head
+    (include-css "mystyle.css")]
+   [:h1 "LoRA Web"]
+   [:form
+    [:label "Hii"]
+    [:input {:type :text}]]])
+
 ;; routes get redefined on each reload
 (.get app "/"
       (fn [req res]
-        (.send res "Hello world")))
+        (.send res (html page))))
 
 (.post app "/msg"
        (fn [req res]
