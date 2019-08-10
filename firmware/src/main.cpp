@@ -189,6 +189,19 @@ void setup() {
     request->send(200, "text/plain", "Fine");
   });
 
+  server.onNotFound([](AsyncWebServerRequest *request) {
+	if (request->method() == HTTP_OPTIONS) {
+		request->send(200);
+	} else {
+		request->send(404);
+	}
+});
+
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,POST,PUT");
+  //DefaultHeaders::Instance().addHeader("Access-Control-Request-Headers", "Access-Control-Allow-Headers, Origin,Accept, X-Requested-With, Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers");
+  DefaultHeaders::Instance().addHeader("Access-Control-Request-Headers", "content-type");
+
   server.begin();
 }
 

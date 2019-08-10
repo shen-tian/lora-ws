@@ -1,0 +1,12 @@
+/*.log
+/target
+/*-init.clj
+/resources/public/js/compiled
+/resources/public/css
+out
+.nrepl-port
+/.rebel_readline_history
+/.lein-repl-history
+/.lein-failures
+profiles.clj
+.DS_Store
