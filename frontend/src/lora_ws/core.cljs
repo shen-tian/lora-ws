@@ -1,9 +1,14 @@
 (ns lora-ws.core
-  (:require [reagent.core :as reagent]
+  (:require [ajax.core :refer [POST]]
+            [cljs.pprint :as pprint]
+            [clojure.string :as str]
             [goog.crypt.base64 :as b64]
             [octet.core :as buf]
-            [ajax.core :refer [GET POST]]
-            [clojure.string :as str]))
+            [ol.layer.Tile]
+            [ol.source.OSM]
+            [ol.proj]
+            [ol.Map]
+            [reagent.core :as reagent]))
 
 (def packet-spec
   (buf/spec :magic-0 buf/byte
@@ -13,17 +18,13 @@
             :longitude buf/int32
             :accurate? buf/byte))
 
-      ;; newMessage.replace("-", "+");
-      ;; newMessage.replace("_", "/");
-      ;; newMessage.replace(".", "=");
-
 (defn sent-packet
   [{:keys [callsign latitude longitude accurate?]}]
   (let [buffer  (buf/allocate (buf/size packet-spec))
         _       (binding [octet.buffer/*byte-order* :little-endian]
                   (buf/write! buffer {:magic-0   0x2c
                                       :magic-1   0x0b
-                                      :callsign  "ABCD"
+                                      :callsign  callsign
                                       :latitude  (int (* latitude 1E6))
                                       :longitude (int (* longitude 1E6))
                                       :accurate? 0x00}
@@ -40,7 +41,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Vars
 
-(defonce app-state
+(defonce *state
   (reagent/atom {}))
 
 
@@ -48,12 +49,48 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Page
 
+(defn send!
+  []
+  (sent-packet {:longitude (js/parseFloat (:longitude @*state))
+                :latitude  (js/parseFloat (:latitude @*state))
+                :callsign  (:callsign @*state)}))
+
+(defn packet-form
+  []
+  (fn []
+    [:div.form
+     [:div.form-group
+      [:label.control-label "Callsign"]
+      [:input.form-control {:value     (:callsign @*state)
+                            :on-change #(swap! *state assoc :callsign (.-value (.-target %)))}]]
+     [:div.form-group
+      [:label.control-label "Latitude"]
+      [:input.form-control {:value     (:latitude @*state)
+                            :on-change #(swap! *state assoc :latitude (.-value (.-target %)))}]]
+     [:div.form-group
+      [:label.control-label "Longitude"]
+      [:input.form-control {:value     (:longitude @*state)
+                            :on-change #(swap! *state assoc :longitude (.-value (.-target %)))}]]
+     [:pre (with-out-str (pprint/pprint @*state))]
+     [:button.btn.btn-primary {:on-click send!}
+      "Send"]]))
+
 (defn page [ratom]
-  [:div
-   "Welcome to reagent-figwheel."
-   [:button {:on-click #(sent-packet {:longitude 18.416937
-                                      :latitude  -33.923270
-                                      })} "Send"]])
+  [:div.container
+   [:h1 "LoRa Gateway"]
+   [:div.row
+    [:div.col-sm
+     [packet-form]]
+    [:div.col-sm
+     [:div#map {:style {:width "100%"}}]
+     [:button.btn.btn-primary {:on-click #(js/initMap)}
+      "Generate"]]]])
+
+(defn ^:export set-lon-lat
+  [lon lat]
+  (swap! *state assoc :longitude lon)
+  (swap! *state assoc :latitude lat)
+  (send!))
 
 
 
@@ -67,8 +104,9 @@
     ))
 
 (defn reload []
-  (reagent/render [page app-state]
-                  (.getElementById js/document "app")))
+  (reagent/render [page *state]
+                  (.getElementById js/document "app"))
+  (js/initMap))
 
 (defn ^:export main []
   (dev-setup)
